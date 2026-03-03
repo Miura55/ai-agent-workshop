@@ -14,6 +14,10 @@ TRAVILY_API_KEY = os.getenv("TRAVILY_API_KEY")
 if not TRAVILY_API_KEY:
     raise ValueError("TRAVILY_API_KEY is not set in environment variables.")
 
+SYSTEM_PROMPT = """
+あなたは、Web検索を行うAIアシスタントです。ユーザーの質問に対して、Web検索を行い、最新の情報を提供してください。必要に応じて、MCPクライアントを使用して、Web検索ツールを呼び出すことができます。
+"""
+
 # MCPクライアントのインスタンスを作成
 mcp_client = MCPClient(
     lambda: streamable_http_client(
@@ -31,7 +35,8 @@ ollama_model = OllamaModel(
 with mcp_client:
     agent = Agent(
         model=ollama_model,
-        tools=mcp_client.list_tools_sync()  # MCPクライアントをエージェントに登録
+        tools=mcp_client.list_tools_sync(),  # MCPクライアントをエージェントに登録
+        system_prompt=SYSTEM_PROMPT
     )
 
     # エージェントを使用
