@@ -17,7 +17,7 @@ def get_current_time(timezone: str = "UTC") -> str:
 # Ollamaモデルのインスタンスを作成
 ollama_model = OllamaModel(
     host="http://localhost:11434",
-    model_id="granite4:3b"
+    model_id="qwen3.5:0.8b"
 )
 
 # Agentを作成し、Ollamaモデルとget_current_timeツールを登録
@@ -27,4 +27,4 @@ agent = Agent(
 )
 
 # エージェントを使用
-agent("現在の日時を教えてください。")
+agent("ニューヨークの現在の日時を教えてください。")

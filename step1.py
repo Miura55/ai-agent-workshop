@@ -8,7 +8,7 @@ from strands.models.ollama import OllamaModel
 # Ollamaモデルのインスタンスを作成
 ollama_model = OllamaModel(
     host="http://localhost:11434",
-    model_id="granite4:3b"
+    model_id="qwen3.5:0.8b"
 )
 
 # Agentを作成し、Ollamaモデルを登録
