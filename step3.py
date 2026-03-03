@@ -35,4 +35,4 @@ with mcp_client:
     )
 
     # エージェントを使用
-    agent("Pythonのリリース情報を教えてください。")
+    agent("AIの最新トレンドを調べてください。")
