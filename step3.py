@@ -30,7 +30,7 @@ mcp_client = MCPClient(
 # Ollamaモデルのインスタンスを作成
 ollama_model = OllamaModel(
     host="http://localhost:11434",
-    model_id="qwen3.5:0.8b"
+    model_id="qwen3.5:2b"
 )
 
 # Agentを作成し、OllamaモデルとMCPクライアントを登録
