@@ -8,6 +8,7 @@ import streamlit as st
 from strands import Agent
 from strands.models.ollama import OllamaModel
 from strands.tools.mcp.mcp_client import  MCPClient
+from strands.agent.conversation_manager import SlidingWindowConversationManager
 from mcp.client.streamable_http import streamable_http_client
 
 
@@ -35,7 +36,7 @@ SYSTEM_PROMPT = """
 - 参考文献には、Web検索で得られた情報のURLを記載してください。
 
 ## フォーマット
-以下のフォーマットでレポートを生成してください。
+レポートにまとめるときは、以下のフォーマットに従ってください。
 
 ```md
 ## 序論
@@ -52,6 +53,9 @@ mcp_client = MCPClient(
     )
 )
 
+# 会話履歴を管理するためのConversationManagerを作成
+conversation_manager = SlidingWindowConversationManager(window_size=5)
+
 # Ollamaモデルのインスタンスを作成
 ollama_model = OllamaModel(
     host="http://localhost:11434",
@@ -60,42 +64,76 @@ ollama_model = OllamaModel(
 
 st.title("レポート作成代行エージェント")
 
+# セッション状態の初期化
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
-async def streaming(stream):
-    async for event in stream:
-        text = (
-            event.get("event", {})
-            .get("contentBlockDelta", {})
-            .get("delta", {})
-            .get("text", "")
-        )
-
-        yield text
+# 会話履歴を表示
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
 
 
-async def collect_response(prompt: str):
-    chunks = []
+async def stream_response(prompt: str, placeholder, messages_history):
+    """リアルタイムストリーミング表示を行う"""
+    full_response = ""
+
     with mcp_client:
+        # 過去の会話履歴をAgentに渡す
         agent = Agent(
             model=ollama_model,
             tools=mcp_client.list_tools_sync(),
-            system_prompt=SYSTEM_PROMPT
+            system_prompt=SYSTEM_PROMPT,
+            messages=messages_history  # 会話履歴をAgentに渡す
         )
 
-        async for text in streaming(agent.stream_async(prompt=prompt)):
-            if text:
-                chunks.append(text)
+        async for event in agent.stream_async(prompt=prompt):
+            # ストリーミングイベントからテキストを取得
+            text = ""
+            if "event" in event:
+                event_data = event.get("event", {})
+                if "contentBlockDelta" in event_data:
+                    delta = event_data.get("contentBlockDelta", {}).get("delta", {})
+                    text = delta.get("text", "")
+                elif "text" in event_data:
+                    text = event_data.get("text", "")
 
-    return chunks
+            if text:
+                full_response += text
+                # プレースホルダーに現在の内容を表示
+                placeholder.markdown(full_response)
+
+    return full_response
 
 
 if prompt := st.chat_input():
+    # ユーザーメッセージを表示
     with st.chat_message("user"):
-        st.write(prompt)
+        st.markdown(prompt)
 
-    try:
-        response_chunks = asyncio.run(collect_response(prompt))
-        with st.chat_message("assistant"):
-            st.write_stream(iter(response_chunks))
-    except Exception as exc:  # surface errors without killing Streamlit
-        st.error(f"エージェントの実行中にエラーが発生しました: {exc}")
+    print("prompt:", prompt)  # デバッグ用にプロンプトをコンソールに出力
+
+    # アシスタント応答用のプレースホルダーを作成
+    with st.chat_message("assistant"):
+        response_placeholder = st.empty()
+
+        try:
+            # 現在の会話履歴をAgentに渡す（現在のユーザーメッセージは除く）
+            messages_history = st.session_state.messages.copy()
+
+            # ストリーミング応答を実行（会話履歴を含む）
+            full_response = asyncio.run(stream_response(prompt, response_placeholder, messages_history))
+
+            # ユーザーメッセージを履歴に追加
+            st.session_state.messages.append({"role": "user", "content": prompt})
+
+            # AIの応答を履歴に追加
+            st.session_state.messages.append({"role": "assistant", "content": full_response})
+
+        except Exception as e:
+            error_message = f"エラーが発生しました: {str(e)}"
+            st.error(error_message)
+            # エラーの場合もユーザーメッセージを履歴に追加
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            # エラーメッセージも履歴に追加
+            st.session_state.messages.append({"role": "assistant", "content": error_message})

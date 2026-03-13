@@ -43,18 +43,6 @@ ollama_model = OllamaModel(
     model_id="qwen3.5:2b"
 )
 
-tool_use_ids = []  # 使用したツールのIDを記録するリスト
-def callback_handler(**kwargs):
-    if "data" in kwargs:
-        # Log the streamed data chunks
-        print(kwargs["data"], end="")
-    elif "current_tool_use" in kwargs:
-        tool = kwargs["current_tool_use"]
-        if tool["toolUseId"] not in tool_use_ids:
-            # Log the tool use
-            print(f"\n[Using tool: {tool.get('name')}]")
-            tool_use_ids.append(tool["toolUseId"])
-
 # Agentを作成し、OllamaモデルとMCPクライアントを登録
 with mcp_client:
     agent = Agent(
@@ -62,7 +50,6 @@ with mcp_client:
         tools=mcp_client.list_tools_sync(),  # MCPクライアントをエージェントに登録
         system_prompt=SYSTEM_PROMPT,
         conversation_manager=conversation_manager,  # 会話履歴を管理するConversationManagerをエージェントに登録
-        callback_handler=callback_handler  # コールバック関数をエージェントに登録
     )
 
     while True:
