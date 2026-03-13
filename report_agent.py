@@ -2,7 +2,9 @@
 レポート作成代行エージェント
 """
 import os
+import asyncio
 from dotenv import load_dotenv
+import streamlit as st
 from strands import Agent
 from strands.models.ollama import OllamaModel
 from strands.tools.mcp.mcp_client import  MCPClient
@@ -56,13 +58,44 @@ ollama_model = OllamaModel(
     model_id="qwen3.5:2b"
 )
 
-# Agentを作成し、OllamaモデルとMCPクライアントを登録
-with mcp_client:
-    agent = Agent(
-        model=ollama_model,
-        tools=mcp_client.list_tools_sync(),  # MCPクライアントをエージェントに登録
-        system_prompt=SYSTEM_PROMPT
-    )
+st.title("レポート作成代行エージェント")
 
-    # エージェントを使用
-    agent("フーリエ変換の概要を調べてレポートにまとめてください")
+
+async def streaming(stream):
+    async for event in stream:
+        text = (
+            event.get("event", {})
+            .get("contentBlockDelta", {})
+            .get("delta", {})
+            .get("text", "")
+        )
+
+        yield text
+
+
+async def collect_response(prompt: str):
+    chunks = []
+    with mcp_client:
+        agent = Agent(
+            model=ollama_model,
+            tools=mcp_client.list_tools_sync(),
+            system_prompt=SYSTEM_PROMPT
+        )
+
+        async for text in streaming(agent.stream_async(prompt=prompt)):
+            if text:
+                chunks.append(text)
+
+    return chunks
+
+
+if prompt := st.chat_input():
+    with st.chat_message("user"):
+        st.write(prompt)
+
+    try:
+        response_chunks = asyncio.run(collect_response(prompt))
+        with st.chat_message("assistant"):
+            st.write_stream(iter(response_chunks))
+    except Exception as exc:  # surface errors without killing Streamlit
+        st.error(f"エージェントの実行中にエラーが発生しました: {exc}")
