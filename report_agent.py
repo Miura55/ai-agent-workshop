@@ -76,7 +76,7 @@ for message in st.session_state.messages:
 
 async def stream_response(prompt: str, placeholder, messages_history):
     """リアルタイムストリーミング表示を行う"""
-    full_response = ""
+    streamed_response = ""
 
     with mcp_client:
         # 過去の会話履歴をAgentに渡す
@@ -99,11 +99,11 @@ async def stream_response(prompt: str, placeholder, messages_history):
                     text = event_data.get("text", "")
 
             if text:
-                full_response += text
+                streamed_response += text
                 # プレースホルダーに現在の内容を表示
-                placeholder.markdown(full_response)
+                placeholder.markdown(streamed_response)
 
-    return full_response
+    return streamed_response
 
 
 if prompt := st.chat_input():
