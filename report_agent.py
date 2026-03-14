@@ -74,7 +74,7 @@ for message in st.session_state.messages:
         st.markdown(message["content"])
 
 
-async def stream_response(prompt: str, placeholder, messages_history):
+async def stream_response(conversation_prompt: str, placeholder, previous_messages):
     """リアルタイムストリーミング表示を行う"""
     streamed_response = ""
 
@@ -84,10 +84,10 @@ async def stream_response(prompt: str, placeholder, messages_history):
             model=ollama_model,
             tools=mcp_client.list_tools_sync(),
             system_prompt=SYSTEM_PROMPT,
-            messages=messages_history  # 会話履歴をAgentに渡す
+            messages=previous_messages  # 会話履歴をAgentに渡す
         )
 
-        async for event in agent.stream_async(prompt=prompt):
+        async for event in agent.stream_async(prompt=conversation_prompt):
             # ストリーミングイベントからテキストを取得
             text = ""
             if "event" in event:
