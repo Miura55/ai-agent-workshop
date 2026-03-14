@@ -53,9 +53,6 @@ mcp_client = MCPClient(
     )
 )
 
-# 会話履歴を管理するためのConversationManagerを作成
-conversation_manager = SlidingWindowConversationManager(window_size=5)
-
 # Ollamaモデルのインスタンスを作成
 ollama_model = OllamaModel(
     host="http://localhost:11434",
@@ -68,23 +65,30 @@ st.title("レポート作成代行エージェント")
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+if "conversation_manager" not in st.session_state:
+    st.session_state.conversation_manager = SlidingWindowConversationManager(window_size=5)
+
+if "agent_messages" not in st.session_state:
+    st.session_state.agent_messages = []
+
 # 会話履歴を表示
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
 
-async def stream_response(conversation_prompt: str, placeholder, previous_messages):
+async def stream_response(conversation_prompt: str, placeholder, previous_agent_messages):
     """リアルタイムストリーミング表示を行う"""
     streamed_response = ""
 
     with mcp_client:
-        # 過去の会話履歴をAgentに渡す
+        # 会話履歴はConversationManagerで管理する
         agent = Agent(
             model=ollama_model,
             tools=mcp_client.list_tools_sync(),
             system_prompt=SYSTEM_PROMPT,
-            messages=previous_messages  # 会話履歴をAgentに渡す
+            messages=previous_agent_messages,
+            conversation_manager=st.session_state.conversation_manager,
         )
 
         async for event in agent.stream_async(prompt=conversation_prompt):
@@ -103,7 +107,7 @@ async def stream_response(conversation_prompt: str, placeholder, previous_messag
                 # プレースホルダーに現在の内容を表示
                 placeholder.markdown(streamed_response)
 
-    return streamed_response
+    return streamed_response, agent.messages
 
 
 if prompt := st.chat_input():
@@ -118,15 +122,17 @@ if prompt := st.chat_input():
         response_placeholder = st.empty()
 
         try:
-            # 現在の会話履歴をAgentに渡す（現在のユーザーメッセージは除く）
-            messages_history = st.session_state.messages.copy()
+            previous_agent_messages = st.session_state.agent_messages.copy()
 
-            # ストリーミング応答を実行（会話履歴を含む）
-            full_response = asyncio.run(stream_response(
+            # ストリーミング応答を実行
+            full_response, updated_agent_messages = asyncio.run(stream_response(
                 prompt,
                 response_placeholder,
-                messages_history
+                previous_agent_messages,
             ))
+
+            # Agent内部の正しいメッセージ形式を次ターンへ引き継ぐ
+            st.session_state.agent_messages = updated_agent_messages
 
             # ユーザーメッセージを履歴に追加
             st.session_state.messages.append({"role": "user", "content": prompt})
