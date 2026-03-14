@@ -122,7 +122,11 @@ if prompt := st.chat_input():
             messages_history = st.session_state.messages.copy()
 
             # ストリーミング応答を実行（会話履歴を含む）
-            full_response = asyncio.run(stream_response(prompt, response_placeholder, messages_history))
+            full_response = asyncio.run(stream_response(
+                prompt,
+                response_placeholder,
+                messages_history
+            ))
 
             # ユーザーメッセージを履歴に追加
             st.session_state.messages.append({"role": "user", "content": prompt})
