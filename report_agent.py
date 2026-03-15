@@ -2,14 +2,17 @@
 レポート作成代行エージェント
 """
 import os
+import time
 import asyncio
 from dotenv import load_dotenv
 import streamlit as st
 from strands import Agent
 from strands.models.ollama import OllamaModel
+from strands.tools import tool
 from strands.tools.mcp.mcp_client import  MCPClient
 from strands.agent.conversation_manager import SlidingWindowConversationManager
 from mcp.client.streamable_http import streamable_http_client
+from Markdown2docx import Markdown2docx
 
 
 load_dotenv()
@@ -17,15 +20,23 @@ TRAVILY_API_KEY = os.getenv("TRAVILY_API_KEY")
 if not TRAVILY_API_KEY:
     raise ValueError("TRAVILY_API_KEY is not set in environment variables.")
 
+
+# ファイル保存用のディレクトリを作成
+if not os.path.exists("reports"):
+    os.makedirs("reports")
+
+
 SYSTEM_PROMPT = """
 あなたはレポート作成を代行するエージェントです。
 ユーザーの質問に対して、Web検索を行い、最新の情報を提供してください。
 必要に応じて、MCPクライアントを使用して、Web検索ツールを呼び出すことができます。
+また、レポートの内容をファイルに保存するためのツールも用意されています。
 
 ## 要件
 - MCPクライアントを使用して、Web検索ツールを呼び出すことができます。
 - 公平性を保ち、偏見のない情報を提供してください。
 - ユーザーが求めている情報を正確に理解し、適切な検索クエリを生成してください。
+- レポートの内容をファイルに保存するときは、`write_report_to_docx` を使用してください。
 - 回答は日本語で提供してください。
 
 ## 構成
@@ -59,25 +70,27 @@ ollama_model = OllamaModel(
     model_id="qwen3.5:2b"
 )
 
-st.title("レポート作成代行エージェント")
 
-# セッション状態の初期化
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+@tool
+def write_report_to_docx(report_content: str) -> str:
+    """レポート内容をDOCXファイルに書き込む
+    
+    Args:
+        report_content (str): レポートの内容（Markdown形式）
 
-if "conversation_manager" not in st.session_state:
-    st.session_state.conversation_manager = SlidingWindowConversationManager(window_size=5)
+    Returns:
+        str: 保存されたファイルのパス
+    """
+    tmp_file = f"reports/{int(time.time())}"
+    with open(f"{tmp_file}.md", "w", encoding="utf-8") as f:
+        f.write(report_content)
+    converter = Markdown2docx(tmp_file)
+    converter.eat_soup()
+    converter.save()
+    return f"レポートが保存されました: {tmp_file}.docx"
 
-if "agent_messages" not in st.session_state:
-    st.session_state.agent_messages = []
 
-# 会話履歴を表示
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-
-
-async def stream_response(conversation_prompt: str, placeholder, previous_agent_messages):
+async def stream_response(conversation_prompt: str, placeholder, agent_messages):
     """リアルタイムストリーミング表示を行う"""
     streamed_response = ""
 
@@ -85,9 +98,9 @@ async def stream_response(conversation_prompt: str, placeholder, previous_agent_
         # 会話履歴はConversationManagerで管理する
         agent = Agent(
             model=ollama_model,
-            tools=mcp_client.list_tools_sync(),
+            tools=mcp_client.list_tools_sync() + [write_report_to_docx],
             system_prompt=SYSTEM_PROMPT,
-            messages=previous_agent_messages,
+            messages=agent_messages,
             conversation_manager=st.session_state.conversation_manager,
         )
 
@@ -108,6 +121,24 @@ async def stream_response(conversation_prompt: str, placeholder, previous_agent_
                 placeholder.markdown(streamed_response)
 
     return streamed_response, agent.messages
+
+
+st.title("レポート作成代行エージェント")
+
+# セッション状態の初期化
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+if "conversation_manager" not in st.session_state:
+    st.session_state.conversation_manager = SlidingWindowConversationManager(window_size=5)
+
+if "agent_messages" not in st.session_state:
+    st.session_state.agent_messages = []
+
+# 会話履歴を表示
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
 
 
 if prompt := st.chat_input():
