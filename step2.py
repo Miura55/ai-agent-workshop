@@ -10,7 +10,14 @@ from strands.tools import tool
 
 @tool
 def get_current_time(timezone: str = "UTC") -> str:
-    """現在の日時を返すツール"""
+    """現在の日時を返すツール
+    
+    Args:
+        timezone (str, optional): タイムゾーン（例: "Asia/Tokyo"）。デフォルトは "UTC"。
+
+    Returns:
+        str: 現在の日時（指定されたタイムゾーン）
+    """
     now = datetime.now(ZoneInfo(timezone))
     return now.strftime("%Y-%m-%d %H:%M:%S %Z")
 
