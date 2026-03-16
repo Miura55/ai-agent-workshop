@@ -119,6 +119,10 @@ async def stream_response(conversation_prompt: str, placeholder, agent_messages)
                     text = delta.get("text", "")
                 elif "text" in event_data:
                     text = event_data.get("text", "")
+            elif "current_tool_use" in event:
+                # ツール使用イベントからテキストを取得
+                tool_use = event.get("current_tool_use", {})
+                text = f"\n\n```\n⚒️ Using tool: {tool_use.get('name', '')}\n```\n\n" 
 
             if text:
                 streamed_response += text
