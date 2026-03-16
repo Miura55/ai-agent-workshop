@@ -74,7 +74,7 @@ ollama_model = OllamaModel(
 @tool
 def write_report_to_docx(report_content: str) -> str:
     """レポート内容をDOCXファイルに書き込む
-    
+
     Args:
         report_content (str): レポートの内容（Markdown形式）
 
@@ -84,9 +84,14 @@ def write_report_to_docx(report_content: str) -> str:
     tmp_file = f"reports/{int(time.time())}"
     with open(f"{tmp_file}.md", "w", encoding="utf-8") as f:
         f.write(report_content)
-    converter = Markdown2docx(tmp_file)
-    converter.eat_soup()
-    converter.save()
+
+    try:
+        converter = Markdown2docx(tmp_file)
+        converter.eat_soup()
+        converter.save()
+    except Exception as e:
+        return f"レポートの保存中にエラーが発生しました: {str(e)}"
+
     return f"レポートが保存されました: {tmp_file}.docx"
 
 
