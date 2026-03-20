@@ -10,9 +10,9 @@ from mcp.client.streamable_http import streamable_http_client
 
 
 load_dotenv()
-TRAVILY_API_KEY = os.getenv("TRAVILY_API_KEY")
-if not TRAVILY_API_KEY:
-    raise ValueError("TRAVILY_API_KEY is not set in environment variables.")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+if not TAVILY_API_KEY:
+    raise ValueError("TAVILY_API_KEY is not set in environment variables.")
 
 SYSTEM_PROMPT = """
 あなたは、Web検索を行うAIアシスタントです。ユーザーの質問に対して、Web検索を行い、最新の情報を提供してください。
@@ -29,7 +29,7 @@ SYSTEM_PROMPT = """
 # MCPクライアントのインスタンスを作成
 mcp_client = MCPClient(
     lambda: streamable_http_client(
-        f"https://mcp.tavily.com/mcp/?tavilyApiKey={TRAVILY_API_KEY}"
+        f"https://mcp.tavily.com/mcp/?tavilyApiKey={TAVILY_API_KEY}"
     )
 )
 
