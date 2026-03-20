@@ -9,7 +9,7 @@ import streamlit as st
 from strands import Agent
 from strands.models.ollama import OllamaModel
 from strands.tools import tool
-from strands.tools.mcp.mcp_client import  MCPClient
+from strands.tools.mcp.mcp_client import MCPClient
 from strands.agent.conversation_manager import SlidingWindowConversationManager
 from mcp.client.streamable_http import streamable_http_client
 from Markdown2docx import Markdown2docx

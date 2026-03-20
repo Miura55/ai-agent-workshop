@@ -5,7 +5,7 @@ import os
 from dotenv import load_dotenv
 from strands import Agent
 from strands.models.ollama import OllamaModel
-from strands.tools.mcp.mcp_client import  MCPClient
+from strands.tools.mcp.mcp_client import MCPClient
 from mcp.client.streamable_http import streamable_http_client
 
 
