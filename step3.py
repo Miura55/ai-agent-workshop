@@ -1,5 +1,5 @@
 """
-Step3: MCPクライアントとの連携
+Step3: MCPサーバーとの連携
 """
 import os
 from dotenv import load_dotenv
