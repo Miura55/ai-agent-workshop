@@ -58,7 +58,7 @@ mcp_client = MCPClient(
 # Ollamaモデルのインスタンスを作成
 ollama_model = OllamaModel(
     host="http://localhost:11434",
-    model_id="qwen3.5:2b"
+    model_id="gemma4:e4b"
 )
 
 
