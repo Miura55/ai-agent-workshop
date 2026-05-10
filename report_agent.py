@@ -123,6 +123,7 @@ async def stream_response(conversation_prompt: str, placeholder, agent_messages)
     return streamed_response, agent.messages
 
 
+st.set_page_config(page_title="レポート作成代行エージェント", page_icon="📝")
 st.title("レポート作成代行エージェント")
 
 # セッション状態の初期化
