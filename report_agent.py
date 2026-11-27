@@ -6,6 +6,8 @@ import time
 import asyncio
 import json
 import uuid
+import tempfile
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from dotenv import load_dotenv
@@ -17,8 +19,16 @@ from strands.tools.mcp.mcp_client import MCPClient
 from strands.agent.conversation_manager import SlidingWindowConversationManager
 from mcp.client.streamable_http import streamable_http_client
 import Markdown2docx as markdown2docx_module
-from Markdown2docx import HtmlListParser, Markdown2docx
+from Markdown2docx import Markdown2docx
 from mem0 import Memory
+
+
+HTML_LIST_PARSER_BASE = getattr(
+    markdown2docx_module,
+    "_report_agent_original_html_list_parser",
+    markdown2docx_module.HtmlListParser,
+)
+markdown2docx_module._report_agent_original_html_list_parser = HTML_LIST_PARSER_BASE
 
 
 load_dotenv()
@@ -109,54 +119,55 @@ SYSTEM_PROMPT = """
 """
 
 
-class StableHtmlListParser(HtmlListParser):
-    """Keep list type local to each list and emit each item as one paragraph."""
+if getattr(markdown2docx_module.HtmlListParser, "_report_agent_stable_parser", False):
+    StableHtmlListParser = markdown2docx_module.HtmlListParser
+else:
+    class StableHtmlListParser(HTML_LIST_PARSER_BASE):
+        """Keep list type local to each list and emit each item as one paragraph."""
 
-    def __init__(self):
-        super().__init__()
-        self.list_styles = []
-        self.list_items = []
+        def __init__(self):
+            super().__init__()
+            self.list_styles = []
+            self.list_items = []
 
-    def _emit_item_text(self, item):
-        text = " ".join("".join(item["parts"]).split())
-        if not text:
-            return
-        styles = self.list_styles[item["level"]]
-        style = styles[min(item["level"], len(styles) - 1)]
-        self.doc.add_paragraph(text, style=style)
-        item["parts"].clear()
+        def _emit_item_text(self, item):
+            text = " ".join("".join(item["parts"]).split())
+            if not text:
+                return
+            styles = self.list_styles[item["level"]]
+            style = styles[min(item["level"], len(styles) - 1)]
+            self.doc.add_paragraph(text, style=style)
+            item["parts"].clear()
 
-    def handle_starttag(self, tag, attrs):
-        if tag in ("ul", "ol"):
+        def handle_starttag(self, tag, attrs):
+            if tag in ("ul", "ol"):
+                if self.list_items:
+                    self._emit_item_text(self.list_items[-1])
+                styles = ["List Bullet", "List Bullet 2", "List Bullet 3"]
+                if tag == "ol":
+                    styles = ["List Number", "List Number 2", "List Number 3"]
+                self.list_styles.append(styles)
+                super().handle_starttag(tag, attrs)
+            elif tag == "li":
+                self.list_items.append({"level": self.list_level, "parts": []})
+            elif tag == "br" and self.list_items:
+                self.list_items[-1]["parts"].append(" ")
+
+        def handle_endtag(self, tag):
+            if tag == "li" and self.list_items:
+                item = self.list_items.pop()
+                self._emit_item_text(item)
+            elif tag in ("ul", "ol"):
+                super().handle_endtag(tag)
+                if self.list_styles:
+                    self.list_styles.pop()
+
+        def handle_data(self, data):
             if self.list_items:
-                self._emit_item_text(self.list_items[-1])
-            styles = ["List Bullet", "List Bullet 2", "List Bullet 3"]
-            if tag == "ol":
-                styles = ["List Number", "List Number 2", "List Number 3"]
-            self.list_styles.append(styles)
-            super().handle_starttag(tag, attrs)
-        elif tag == "li":
-            self.list_items.append({"level": self.list_level, "parts": []})
-        elif tag == "br" and self.list_items:
-            self.list_items[-1]["parts"].append(" ")
+                self.list_items[-1]["parts"].append(data)
 
-    def handle_endtag(self, tag):
-        if tag == "li" and self.list_items:
-            item = self.list_items.pop()
-            self._emit_item_text(item)
-        elif tag in ("ul", "ol"):
-            super().handle_endtag(tag)
-            if self.list_styles:
-                self.list_styles.pop()
-
-    def handle_data(self, data):
-        if self.list_items:
-            self.list_items[-1]["parts"].append(data)
-
-
-# Markdown2docx mutates HtmlListParser.lists for ordered lists and does not
-# restore it for later unordered lists. Use a parser that tracks each list locally.
-markdown2docx_module.HtmlListParser = StableHtmlListParser
+    StableHtmlListParser._report_agent_stable_parser = True
+    markdown2docx_module.HtmlListParser = StableHtmlListParser
 
 # MCPクライアントのインスタンスを作成
 mcp_client = MCPClient(
@@ -244,17 +255,73 @@ def _load_sessions() -> dict:
             data = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(data, dict) and data.get("id") == path.stem:
                 uuid.UUID(hex=data["id"])
+                data.setdefault("revision", 0)
                 sessions[data["id"]] = data
         except (OSError, json.JSONDecodeError, ValueError):
             continue
     return sessions
 
 
+class SessionConflictError(Exception):
+    """Raised when a session changed after the current tab loaded it."""
+
+
+@st.cache_resource
+def _session_lock_registry():
+    return {"guard": threading.Lock(), "locks": {}}
+
+
+def _session_lock(session_id: str):
+    registry = _session_lock_registry()
+    with registry["guard"]:
+        return registry["locks"].setdefault(session_id, threading.Lock())
+
+
+def _read_session_file(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SessionConflictError("保存済みセッションを読み込めません。") from exc
+
+
 def _save_session(session: dict) -> None:
     path = _session_path(session["id"])
-    temp_path = path.with_suffix(".tmp")
-    temp_path.write_text(json.dumps(session, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp_path.replace(path)
+    with _session_lock(session["id"]):
+        if path.exists():
+            current_session = _read_session_file(path)
+            current_revision = current_session.get("revision", 0)
+            if current_revision != session.get("revision", 0):
+                raise SessionConflictError("別のタブで会話が更新されました。最新の履歴を読み直してください。")
+        else:
+            current_revision = 0
+            if session.get("revision", 0) != 0:
+                raise SessionConflictError("このセッションは別のタブで削除されました。")
+
+        saved_session = dict(session)
+        saved_session["revision"] = current_revision + 1
+        file_descriptor, temp_name = tempfile.mkstemp(
+            prefix=f".{session['id']}-", suffix=".tmp", dir=SESSIONS_DIR
+        )
+        try:
+            with os.fdopen(file_descriptor, "w", encoding="utf-8") as temp_file:
+                json.dump(saved_session, temp_file, ensure_ascii=False, indent=2)
+                temp_file.flush()
+                os.fsync(temp_file.fileno())
+            os.replace(temp_name, path)
+            session["revision"] = saved_session["revision"]
+        finally:
+            Path(temp_name).unlink(missing_ok=True)
+
+
+def _delete_session_file(session: dict) -> None:
+    path = _session_path(session["id"])
+    with _session_lock(session["id"]):
+        if not path.exists():
+            return
+        current_session = _read_session_file(path)
+        if current_session.get("revision", 0) != session.get("revision", 0):
+            raise SessionConflictError("別のタブで会話が更新されました。最新の履歴を読み直してください。")
+        path.unlink()
 
 
 def _new_session() -> dict:
@@ -326,16 +393,20 @@ with st.sidebar:
             st.session_state.active_session_id = sid
             st.rerun()
         if col_delete.button("×", key=f"delete_{sid}", help="この会話を削除"):
-            _session_path(sid).unlink(missing_ok=True)
-            _delete_session_memories(sid)
-            if sid == st.session_state.active_session_id:
-                remaining = [other_id for other_id in session_ids if other_id != sid]
-                if remaining:
-                    st.session_state.active_session_id = remaining[0]
-                else:
-                    replacement = _new_session()
-                    st.session_state.active_session_id = replacement["id"]
-            st.rerun()
+            try:
+                _delete_session_file(session)
+            except SessionConflictError as exc:
+                st.sidebar.warning(str(exc))
+            else:
+                _delete_session_memories(sid)
+                if sid == st.session_state.active_session_id:
+                    remaining = [other_id for other_id in session_ids if other_id != sid]
+                    if remaining:
+                        st.session_state.active_session_id = remaining[0]
+                    else:
+                        replacement = _new_session()
+                        st.session_state.active_session_id = replacement["id"]
+                st.rerun()
 
     if mem0_client:
         st.caption("mem0のローカル記憶: 有効（Ollama + ローカルQdrant）")
@@ -348,10 +419,15 @@ with st.sidebar.form("rename_active_session"):
     renamed_title = st.text_input("選択中の会話名", value=active_session.get("title", "新しい会話"),
                                   max_chars=60)
     if st.form_submit_button("名前を保存") and renamed_title.strip():
-        active_session["title"] = renamed_title.strip()
-        active_session["updated_at"] = datetime.now(timezone.utc).isoformat()
-        _save_session(active_session)
-        st.rerun()
+        renamed_session = dict(active_session)
+        renamed_session["title"] = renamed_title.strip()
+        renamed_session["updated_at"] = datetime.now(timezone.utc).isoformat()
+        try:
+            _save_session(renamed_session)
+        except SessionConflictError as exc:
+            st.sidebar.warning(str(exc))
+        else:
+            st.rerun()
 
 if "loaded_session_id" not in st.session_state or st.session_state.loaded_session_id != active_session["id"]:
     st.session_state.loaded_session_id = active_session["id"]
@@ -401,10 +477,15 @@ if prompt := st.chat_input():
             _save_session(active_session)
             _remember_exchange(active_session["id"], prompt, full_response)
 
+        except SessionConflictError as exc:
+            st.warning(f"{exc} この応答は会話履歴に保存されていません。最新の履歴を読み直してから再度お試しください。")
         except Exception as e:
             error_message = f"エラーが発生しました: {str(e)}"
             st.error(error_message)
             active_session.setdefault("messages", []).append({"role": "user", "content": prompt})
             active_session["messages"].append({"role": "assistant", "content": error_message})
             active_session["updated_at"] = datetime.now(timezone.utc).isoformat()
-            _save_session(active_session)
+            try:
+                _save_session(active_session)
+            except SessionConflictError as exc:
+                st.warning(f"{exc} エラー内容は会話履歴に保存されていません。")
