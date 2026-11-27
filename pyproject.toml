@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "markdown2docx>=0.1.0",
+    "mem0ai>=0.1.0",
     "ollama>=0.6.1",
     "python-dotenv>=1.2.1",
     "strands-agents>=1.28.0",

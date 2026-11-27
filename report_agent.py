@@ -4,6 +4,12 @@
 import os
 import time
 import asyncio
+import json
+import uuid
+import tempfile
+import threading
+from datetime import datetime, timezone
+from pathlib import Path
 from dotenv import load_dotenv
 import streamlit as st
 from strands import Agent
@@ -12,7 +18,17 @@ from strands.tools import tool
 from strands.tools.mcp.mcp_client import MCPClient
 from strands.agent.conversation_manager import SlidingWindowConversationManager
 from mcp.client.streamable_http import streamable_http_client
+import Markdown2docx as markdown2docx_module
 from Markdown2docx import Markdown2docx
+from mem0 import Memory
+
+
+HTML_LIST_PARSER_BASE = getattr(
+    markdown2docx_module,
+    "_report_agent_original_html_list_parser",
+    markdown2docx_module.HtmlListParser,
+)
+markdown2docx_module._report_agent_original_html_list_parser = HTML_LIST_PARSER_BASE
 
 
 load_dotenv()
@@ -24,6 +40,47 @@ if not TAVILY_API_KEY:
 # ファイル保存用のディレクトリを作成
 if not os.path.exists("reports"):
     os.makedirs("reports")
+
+SESSIONS_DIR = Path("sessions")
+SESSIONS_DIR.mkdir(exist_ok=True)
+MEM0_DATA_DIR = SESSIONS_DIR / "mem0_qdrant"
+MEM0_HISTORY_DB = SESSIONS_DIR / "mem0_history.db"
+@st.cache_resource
+def get_mem0_client():
+    return Memory.from_config({
+        "vector_store": {
+            "provider": "qdrant",
+            "config": {
+                "collection_name": "report_agent_memories",
+                "path": str(MEM0_DATA_DIR),
+                "embedding_model_dims": 768,
+            },
+        },
+        "llm": {
+            "provider": "ollama",
+            "config": {
+                "model": "gemma4:e2b",
+                "temperature": 0,
+                "ollama_base_url": "http://localhost:11434",
+            },
+        },
+        "embedder": {
+            "provider": "ollama",
+            "config": {
+                "model": "nomic-embed-text:latest",
+                "ollama_base_url": "http://localhost:11434",
+            },
+        },
+        "history_db_path": str(MEM0_HISTORY_DB),
+    })
+
+
+mem0_error = None
+try:
+    mem0_client = get_mem0_client()
+except Exception as exc:
+    mem0_client = None
+    mem0_error = str(exc)
 
 
 SYSTEM_PROMPT = """
@@ -46,7 +103,71 @@ SYSTEM_PROMPT = """
 - 本論には、複数の章や節で答えに至るべく議論を展開してください。必要に応じて、Web検索で得られた情報を引用してください。
 - 結論には、本論の内容を要約し、序論で提起した問いの答えを簡潔に書いてください。
 - 参考文献には、Web検索で得られた情報のURLを記載してください。
+
+### Markdownの記法（Word出力向け）
+- 見出しは `#`、`##`、`###` を使い、見出し自体に章番号を付けないでください。番号が資料に明記されている場合や、ユーザーが番号付けを指定した場合に限り番号を付けてください。
+- 箇条書きの記号は必ずハイフンと半角スペースの `- ` を使ってください。`* ` や `+ ` を箇条書き記号として使わないでください。順序のない項目には番号を付けないでください。
+- 番号付きリストは、順序が重要な手順・順位・段階、および参考文献一覧に使ってください。番号付きリストは各項目を `1. ` の形式で始め、Markdownの自動採番に任せてください。項目の途中で番号をリセットしたり、番号と箇条書きを混在させたりしないでください。
+- 番号付きリストに `#` を番号記号として使わないでください。Word向けの番号付きリストは必ず `1. ` 形式で記述してください。
+- 参考文献は番号付きリストにし、本文中で番号を使って参照する場合は一覧の番号と一致させてください。
+- 出典に基づく記述の直後に、対応する参考文献番号を `[1]` の形式で本文中に明記してください。複数の出典を使う場合は `[1][2]` のようにすべて示し、参考文献一覧の番号と一致させてください。
+- 太字の装飾（`**...**`）は使用しないでください。
+- 箇条書きの階層は、親項目の次の行に半角スペース4つを入れて `- ` で始めてください。階層を表すために全角スペースやタブを使わず、同じ階層ではインデント幅を統一してください。
+- 箇条書き項目は原則として1項目につき1段落にし、項目間に空行を挟まないでください。リストを終えるときは次の見出しまたは本文との間に空行を入れてください。
+- 本文中で番号や箇条書きに見える記号を使う必要がある場合は、リストとして誤認されないよう文章に組み込んでください。
+- 出力前に、すべての箇条書きが `- ` で始まっていることを確認し、`* ` または `+ ` で始まる箇条書きがあれば `- ` に直してください。あわせて、意図しない番号の追加、番号の重複・飛び、箇条書きの階層とインデント、リストの混在がないか確認してください。
 """
+
+
+if getattr(markdown2docx_module.HtmlListParser, "_report_agent_stable_parser", False):
+    StableHtmlListParser = markdown2docx_module.HtmlListParser
+else:
+    class StableHtmlListParser(HTML_LIST_PARSER_BASE):
+        """Keep list type local to each list and emit each item as one paragraph."""
+
+        def __init__(self):
+            super().__init__()
+            self.list_styles = []
+            self.list_items = []
+
+        def _emit_item_text(self, item):
+            text = " ".join("".join(item["parts"]).split())
+            if not text:
+                return
+            styles = self.list_styles[item["level"]]
+            style = styles[min(item["level"], len(styles) - 1)]
+            self.doc.add_paragraph(text, style=style)
+            item["parts"].clear()
+
+        def handle_starttag(self, tag, attrs):
+            if tag in ("ul", "ol"):
+                if self.list_items:
+                    self._emit_item_text(self.list_items[-1])
+                styles = ["List Bullet", "List Bullet 2", "List Bullet 3"]
+                if tag == "ol":
+                    styles = ["List Number", "List Number 2", "List Number 3"]
+                self.list_styles.append(styles)
+                super().handle_starttag(tag, attrs)
+            elif tag == "li":
+                self.list_items.append({"level": self.list_level, "parts": []})
+            elif tag == "br" and self.list_items:
+                self.list_items[-1]["parts"].append(" ")
+
+        def handle_endtag(self, tag):
+            if tag == "li" and self.list_items:
+                item = self.list_items.pop()
+                self._emit_item_text(item)
+            elif tag in ("ul", "ol"):
+                super().handle_endtag(tag)
+                if self.list_styles:
+                    self.list_styles.pop()
+
+        def handle_data(self, data):
+            if self.list_items:
+                self.list_items[-1]["parts"].append(data)
+
+    StableHtmlListParser._report_agent_stable_parser = True
+    markdown2docx_module.HtmlListParser = StableHtmlListParser
 
 # MCPクライアントのインスタンスを作成
 mcp_client = MCPClient(
@@ -123,21 +244,197 @@ async def stream_response(conversation_prompt: str, placeholder, agent_messages)
     return streamed_response, agent.messages
 
 
+def _session_path(session_id: str) -> Path:
+    return SESSIONS_DIR / f"{session_id}.json"
+
+
+def _load_sessions() -> dict:
+    sessions = {}
+    for path in SESSIONS_DIR.glob("*.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data.get("id") == path.stem:
+                uuid.UUID(hex=data["id"])
+                data.setdefault("revision", 0)
+                sessions[data["id"]] = data
+        except (OSError, json.JSONDecodeError, ValueError):
+            continue
+    return sessions
+
+
+class SessionConflictError(Exception):
+    """Raised when a session changed after the current tab loaded it."""
+
+
+@st.cache_resource
+def _session_lock_registry():
+    return {"guard": threading.Lock(), "locks": {}}
+
+
+def _session_lock(session_id: str):
+    registry = _session_lock_registry()
+    with registry["guard"]:
+        return registry["locks"].setdefault(session_id, threading.Lock())
+
+
+def _read_session_file(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SessionConflictError("保存済みセッションを読み込めません。") from exc
+
+
+def _save_session(session: dict) -> None:
+    path = _session_path(session["id"])
+    with _session_lock(session["id"]):
+        if path.exists():
+            current_session = _read_session_file(path)
+            current_revision = current_session.get("revision", 0)
+            if current_revision != session.get("revision", 0):
+                raise SessionConflictError("別のタブで会話が更新されました。最新の履歴を読み直してください。")
+        else:
+            current_revision = 0
+            if session.get("revision", 0) != 0:
+                raise SessionConflictError("このセッションは別のタブで削除されました。")
+
+        saved_session = dict(session)
+        saved_session["revision"] = current_revision + 1
+        file_descriptor, temp_name = tempfile.mkstemp(
+            prefix=f".{session['id']}-", suffix=".tmp", dir=SESSIONS_DIR
+        )
+        try:
+            with os.fdopen(file_descriptor, "w", encoding="utf-8") as temp_file:
+                json.dump(saved_session, temp_file, ensure_ascii=False, indent=2)
+                temp_file.flush()
+                os.fsync(temp_file.fileno())
+            os.replace(temp_name, path)
+            session["revision"] = saved_session["revision"]
+        finally:
+            Path(temp_name).unlink(missing_ok=True)
+
+
+def _delete_session_file(session: dict) -> None:
+    path = _session_path(session["id"])
+    with _session_lock(session["id"]):
+        if not path.exists():
+            return
+        current_session = _read_session_file(path)
+        if current_session.get("revision", 0) != session.get("revision", 0):
+            raise SessionConflictError("別のタブで会話が更新されました。最新の履歴を読み直してください。")
+        path.unlink()
+
+
+def _new_session() -> dict:
+    now = datetime.now(timezone.utc).isoformat()
+    session = {"id": uuid.uuid4().hex, "title": "新しい会話", "updated_at": now,
+               "messages": [], "agent_messages": []}
+    _save_session(session)
+    return session
+
+
+def _remember_exchange(session_id: str, user_text: str, assistant_text: str) -> None:
+    if not mem0_client:
+        return
+    try:
+        mem0_client.add([
+            {"role": "user", "content": user_text},
+            {"role": "assistant", "content": assistant_text},
+        ], user_id=session_id)
+    except Exception as exc:
+        st.sidebar.caption(f"mem0への保存に失敗しました: {exc}")
+
+
+def _find_session_memories(session_id: str, query: str) -> str:
+    if not mem0_client:
+        return ""
+    try:
+        result = mem0_client.search(query, filters={"user_id": session_id})
+        memories = result.get("results", []) if isinstance(result, dict) else []
+        snippets = [item.get("memory", "") for item in memories if item.get("memory")]
+        return "\n".join(f"- {snippet}" for snippet in snippets[:5])
+    except Exception as exc:
+        st.sidebar.caption(f"mem0の検索に失敗しました: {exc}")
+        return ""
+
+
+def _delete_session_memories(session_id: str) -> None:
+    if not mem0_client:
+        return
+    try:
+        mem0_client.delete_all(user_id=session_id)
+    except Exception as exc:
+        st.sidebar.caption(f"mem0の記憶削除に失敗しました: {exc}")
+
+
 st.set_page_config(page_title="レポート作成代行エージェント", page_icon="📝")
 st.title("レポート作成代行エージェント")
 
-# セッション状態の初期化
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+# セッション一覧を読み込み、サイドバーから会話を切り替える
+sessions = _load_sessions()
+if "active_session_id" not in st.session_state or st.session_state.active_session_id not in sessions:
+    initial_session = _new_session()
+    sessions[initial_session["id"]] = initial_session
+    st.session_state.active_session_id = initial_session["id"]
 
-if "conversation_manager" not in st.session_state:
+with st.sidebar:
+    st.subheader("会話セッション")
+    if st.button("＋ 新しい会話", use_container_width=True):
+        new_session = _new_session()
+        st.session_state.active_session_id = new_session["id"]
+        st.rerun()
+
+    session_ids = sorted(sessions, key=lambda sid: sessions[sid].get("updated_at", ""), reverse=True)
+    for sid in session_ids:
+        session = sessions[sid]
+        col_select, col_delete = st.columns([5, 1])
+        if col_select.button(session.get("title", "新しい会話"), key=f"select_{sid}",
+                             type="primary" if sid == st.session_state.active_session_id else "secondary",
+                             use_container_width=True):
+            st.session_state.active_session_id = sid
+            st.rerun()
+        if col_delete.button("×", key=f"delete_{sid}", help="この会話を削除"):
+            try:
+                _delete_session_file(session)
+            except SessionConflictError as exc:
+                st.sidebar.warning(str(exc))
+            else:
+                _delete_session_memories(sid)
+                if sid == st.session_state.active_session_id:
+                    remaining = [other_id for other_id in session_ids if other_id != sid]
+                    if remaining:
+                        st.session_state.active_session_id = remaining[0]
+                    else:
+                        replacement = _new_session()
+                        st.session_state.active_session_id = replacement["id"]
+                st.rerun()
+
+    if mem0_client:
+        st.caption("mem0のローカル記憶: 有効（Ollama + ローカルQdrant）")
+    else:
+        st.caption(f"mem0を初期化できませんでした: {mem0_error}")
+
+active_session = sessions.get(st.session_state.active_session_id) or _new_session()
+st.session_state.active_session_id = active_session["id"]
+with st.sidebar.form("rename_active_session"):
+    renamed_title = st.text_input("選択中の会話名", value=active_session.get("title", "新しい会話"),
+                                  max_chars=60)
+    if st.form_submit_button("名前を保存") and renamed_title.strip():
+        renamed_session = dict(active_session)
+        renamed_session["title"] = renamed_title.strip()
+        renamed_session["updated_at"] = datetime.now(timezone.utc).isoformat()
+        try:
+            _save_session(renamed_session)
+        except SessionConflictError as exc:
+            st.sidebar.warning(str(exc))
+        else:
+            st.rerun()
+
+if "loaded_session_id" not in st.session_state or st.session_state.loaded_session_id != active_session["id"]:
+    st.session_state.loaded_session_id = active_session["id"]
     st.session_state.conversation_manager = SlidingWindowConversationManager(window_size=5)
 
-if "agent_messages" not in st.session_state:
-    st.session_state.agent_messages = []
-
 # 会話履歴を表示
-for message in st.session_state.messages:
+for message in active_session.get("messages", []):
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
@@ -154,28 +451,41 @@ if prompt := st.chat_input():
         response_placeholder = st.empty()
 
         try:
-            previous_agent_messages = st.session_state.agent_messages.copy()
+            previous_agent_messages = active_session.get("agent_messages", []).copy()
+            memories = _find_session_memories(active_session["id"], prompt)
+            prompt_with_memories = prompt
+            if memories:
+                prompt_with_memories = (
+                    f"過去のこのセッションに関連する記憶です。必要な場合だけ参考にしてください。\n"
+                    f"{memories}\n\n今回の依頼: {prompt}"
+                )
 
             # ストリーミング応答を実行
             full_response, updated_agent_messages = asyncio.run(stream_response(
-                prompt,
+                prompt_with_memories,
                 response_placeholder,
                 previous_agent_messages,
             ))
 
             # Agent内部の正しいメッセージ形式を次ターンへ引き継ぐ
-            st.session_state.agent_messages = updated_agent_messages
+            active_session["agent_messages"] = updated_agent_messages
+            active_session.setdefault("messages", []).append({"role": "user", "content": prompt})
+            active_session["messages"].append({"role": "assistant", "content": full_response})
+            if active_session["title"] == "新しい会話":
+                active_session["title"] = prompt[:32] + ("…" if len(prompt) > 32 else "")
+            active_session["updated_at"] = datetime.now(timezone.utc).isoformat()
+            _save_session(active_session)
+            _remember_exchange(active_session["id"], prompt, full_response)
 
-            # ユーザーメッセージを履歴に追加
-            st.session_state.messages.append({"role": "user", "content": prompt})
-
-            # AIの応答を履歴に追加
-            st.session_state.messages.append({"role": "assistant", "content": full_response})
-
+        except SessionConflictError as exc:
+            st.warning(f"{exc} この応答は会話履歴に保存されていません。最新の履歴を読み直してから再度お試しください。")
         except Exception as e:
             error_message = f"エラーが発生しました: {str(e)}"
             st.error(error_message)
-            # エラーの場合もユーザーメッセージを履歴に追加
-            st.session_state.messages.append({"role": "user", "content": prompt})
-            # エラーメッセージも履歴に追加
-            st.session_state.messages.append({"role": "assistant", "content": error_message})
+            active_session.setdefault("messages", []).append({"role": "user", "content": prompt})
+            active_session["messages"].append({"role": "assistant", "content": error_message})
+            active_session["updated_at"] = datetime.now(timezone.utc).isoformat()
+            try:
+                _save_session(active_session)
+            except SessionConflictError as exc:
+                st.warning(f"{exc} エラー内容は会話履歴に保存されていません。")
